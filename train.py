@@ -459,18 +459,18 @@ def main():
         if args.resume:
             load_checkpoint(model_ema.module, args.resume, use_ema=True)
 
-    # setup distributed training
+    # setup distributed training - use always Native DDP
     if args.distributed:
-        if has_apex and use_amp != 'apex':
-            if args.local_rank == 0:
-                _logger.info("Using native Torch DistributedDataParallel.")
-            model = NativeDDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
+        #if has_apex and use_amp != 'apex':
+        if args.local_rank == 0:
+            _logger.info("Using native Torch DistributedDataParallel.")
+        model = NativeDDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
  
-        else:
-            # Apex DDP preferred unless native amp is activated
-            if args.local_rank == 0:
-                _logger.info("Using NVIDIA APEX DistributedDataParallel.")
-            model = ApexDDP(model, delay_allreduce=True)
+        #else:
+        #    # Apex DDP preferred unless native amp is activated
+        #    if args.local_rank == 0:
+        #        _logger.info("Using NVIDIA APEX DistributedDataParallel.")
+        #    model = ApexDDP(model, delay_allreduce=True)
  
         # NOTE: EMA model does not need to be wrapped by DDP
 
