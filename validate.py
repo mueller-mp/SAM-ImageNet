@@ -19,9 +19,9 @@ import torch.nn.parallel
 from collections import OrderedDict
 from contextlib import suppress
 
-from timm_esam.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
-from timm_esam.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
-from timm_esam.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
+from timm_sam_on.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
+from timm_sam_on.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
+from timm_sam_on.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
 
 has_apex = False
 try:
@@ -136,7 +136,7 @@ def validate(args):
 
     # create model
     model = create_model(
-        args.model,
+        'vit_small_patch16_224' if args.model=='vit_s' else args.model,
         pretrained=args.pretrained,
         num_classes=args.num_classes,
         in_chans=3,
@@ -145,9 +145,21 @@ def validate(args):
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes
-
+    if args.model=='vit_s':
+        from utils_naman import ConvBlock, normalize_model
+        IMAGENET_MEAN = [c * 1. for c in (0.485, 0.456, 0.406)] #[np.array([0., 0., 0.]), np.array([0.485, 0.456, 0.406])][-1] * 255
+        IMAGENET_STD = [c * 1. for c in (0.229, 0.224, 0.225)]
+        model.patch_embed.proj = ConvBlock(48, end_siz=8)
+        model = normalize_model(model, mean=IMAGENET_MEAN, std=IMAGENET_STD)
     if args.checkpoint:
-        load_checkpoint(model, args.checkpoint, args.use_ema)
+        if args.model=='vit_s':
+            from timm_sam_on.models.helpers import load_state_dict
+            state_dict = load_state_dict(args.checkpoint, args.use_ema)
+            state_dict = {k.split('base_model.')[1]:v for k,v in state_dict.items()}
+            # state_dict = {k.split('module.')[1]:v for k,v in state_dict.items()}
+            model.load_state_dict(state_dict, strict=True)
+        else:
+            load_checkpoint(model, args.checkpoint, args.use_ema)
 
     param_count = sum([m.numel() for m in model.parameters()])
     _logger.info('Model %s created, param count: %d' % (args.model, param_count))
@@ -190,18 +202,19 @@ def validate(args):
 
     crop_pct = 1.0 if test_time_pool else data_config['crop_pct']
     loader = create_loader(
-        dataset,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        crop_pct=crop_pct,
-        pin_memory=args.pin_mem,
-        tf_preprocessing=args.tf_preprocessing)
-
+            dataset,
+            input_size=data_config['input_size'],
+            batch_size=args.batch_size,
+            use_prefetcher=args.prefetcher,
+            interpolation=data_config['interpolation'],
+            mean=data_config['mean'],
+            std=data_config['std'],
+            num_workers=args.workers,
+            crop_pct=crop_pct,
+            pin_memory=args.pin_mem,
+            tf_preprocessing=args.tf_preprocessing,
+            )
+    print('True transform',loader.dataset.transform)
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()

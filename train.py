@@ -28,14 +28,14 @@ import torch.nn as nn
 import torchvision.utils
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
-from timm_esam.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
-from timm_esam.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint,\
+from timm_sam_on.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
+from timm_sam_on.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint,\
     convert_splitbn_model, model_parameters
-from timm_esam.utils import *
-from timm_esam.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
-from timm_esam.optim import create_optimizer_v2, optimizer_kwargs,layer_dp_sam
-from timm_esam.scheduler import create_scheduler
-from timm_esam.utils import ApexScaler, NativeScaler
+from timm_sam_on.utils import *
+from timm_sam_on.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
+from timm_sam_on.optim import create_optimizer_v2, optimizer_kwargs,sam
+from timm_sam_on.scheduler import create_scheduler
+from timm_sam_on.utils import ApexScaler, NativeScaler
 
 try:
     from apex import amp
@@ -278,22 +278,21 @@ parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
 parser.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
-#para for esam 
-parser.add_argument("--weight_dropout", default=0.0, type=float, help="Dropout rate.")
-parser.add_argument("--opt_dropout", default=0.0, type=float, help="Dropout rate.")
-parser.add_argument("--nograd_cutoff", default=0.0, type=float, help="Dropout rate.")
+#para for sam 
+parser.add_argument("--weight_dropout", default=0.0, type=float, help="Dropout rate.") # only for esam
+parser.add_argument("--opt_dropout", default=0.0, type=float, help="Dropout rate.")# only for esam
+parser.add_argument("--nograd_cutoff", default=0.0, type=float, help="Dropout rate.")# only for esam
 parser.add_argument("--rho", default=0.05, type=float, help="Rho parameter for SAM.")
-parser.add_argument("--temperature", default=3, type=int, help="temperature.")
+parser.add_argument("--temperature", default=3, type=int, help="temperature.")# only for esam
 parser.add_argument('--isASAM',action='store_true', default=False)
-parser.add_argument('--pickmiddle',action='store_true', default=False)
-# parser.add_argument('--disable-esam',action='store_false', default=True) # unused
+parser.add_argument('--pickmiddle',action='store_true', default=False)# only for esam
 parser.add_argument('--sam_variant',default='esam', choices=['esam', 'sam', 'base', 'gsam'])
 parser.add_argument('--note',default='_', help='A helper to note something in the folder name')
 
 
 parser.add_argument('--only_bn',action='store_true', default=False, help='adv step only for BN layers')
-parser.add_argument('--layerwise',action='store_true', default=False, help='adv step only for BN layers')
-parser.add_argument('--elementwise_linf',action='store_true', default=False, help='adv step only for BN layers')
+parser.add_argument('--layerwise',action='store_true', default=False, help='layerwise normalization. isASAM has to be true for this to be effective')
+parser.add_argument('--elementwise_linf',action='store_true', default=False, help='elementwise l-inf normalization. isASAM has to be true for this to be effective')
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -361,7 +360,7 @@ def main():
     random_seed(args.seed, args.rank,args.opt_dropout)
 
     model = create_model(
-        args.model,
+        'vit_small_patch16_224' if args.model=='vit_s' else args.model,
         pretrained=args.pretrained,
         num_classes=args.num_classes,
         drop_rate=args.drop,
@@ -373,10 +372,25 @@ def main():
         bn_momentum=args.bn_momentum,
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
-        checkpoint_path=args.initial_checkpoint)
+        checkpoint_path=args.initial_checkpoint if args.model != 'vit_s' else '')
+    
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
+
+    if args.model=='vit_s':
+        from utils_naman import ConvBlock, normalize_model
+        IMAGENET_MEAN = [c * 1. for c in (0.485, 0.456, 0.406)] #[np.array([0., 0., 0.]), np.array([0.485, 0.456, 0.406])][-1] * 255
+        IMAGENET_STD = [c * 1. for c in (0.229, 0.224, 0.225)]
+        model.patch_embed.proj = ConvBlock(48, end_siz=8)
+        model = normalize_model(model, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+        if args.initial_checkpoint != '':
+                from timm_sam_on.models.helpers import load_state_dict
+                ckpt = load_state_dict(args.initial_checkpoint)
+                ckpt = {k.replace('module.', ''): v for k, v in ckpt.items()}
+                ckpt = {k.replace('base_model.', ''): v for k, v in ckpt.items()}
+                ckpt = {k.replace('se_', 'se_module.'): v for k, v in ckpt.items()}
+                model.load_state_dict(ckpt, strict=True)
 
     if args.local_rank == 0:
         _logger.info(
@@ -420,9 +434,9 @@ def main():
 
     base_optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
     if args.sam_variant=='gsam':
-        optimizer = layer_dp_sam.GSAM(params=model.parameters(), base_optimizer=base_optimizer, rho=args.rho, model=model, gsam_alpha=0.01, rho_scheduler=None, adaptive=args.isASAM)
+        optimizer = sam.GSAM(params=model.parameters(), base_optimizer=base_optimizer, rho=args.rho, model=model, gsam_alpha=0.01, rho_scheduler=None, adaptive=args.isASAM)
     else:
-        optimizer = layer_dp_sam.SAM(model.parameters(), base_optimizer, rho=args.rho, weight_dropout=args.weight_dropout,adaptive=args.isASAM, layerwise=args.layerwise, elementwise_linf=args.elementwise_linf,nograd_cutoff=args.nograd_cutoff,opt_dropout = args.opt_dropout,temperature=args.temperature)
+        optimizer = sam.SAM(model.parameters(), base_optimizer, rho=args.rho, weight_dropout=args.weight_dropout,adaptive=args.isASAM, layerwise=args.layerwise, elementwise_linf=args.elementwise_linf,nograd_cutoff=args.nograd_cutoff,opt_dropout = args.opt_dropout,temperature=args.temperature)
 
     # setup automatic mixed-precision (AMP) loss scaling and op casting
     amp_autocast = suppress  # do nothing
@@ -605,6 +619,7 @@ def main():
             f.write(args_text)
 
     try:
+        eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
         for epoch in range(start_epoch, num_epochs):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
@@ -709,7 +724,8 @@ def train_one_epoch(
         optimizer.step()
         predictions,loss = optimizer.returnthings
         loss = loss.mean()
-
+        # if args.local_rank==0:
+        #      _logger.info(' '.join([str(param_group['lr']) for param_group in optimizer.param_groups]))
         if model_ema is not None:
             model_ema.update(model)
 

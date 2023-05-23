@@ -19,9 +19,9 @@ import torch.nn.parallel
 from collections import OrderedDict
 from contextlib import suppress
 import yaml
-from timm_esam.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
-from timm_esam.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
-from timm_esam.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
+from timm_sam_on.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models
+from timm_sam_on.data import create_dataset, create_loader, resolve_data_config, RealLabelsImagenet
+from timm_sam_on.utils import accuracy, AverageMeter, natural_key, setup_default_logging, set_jit_legacy
 
 has_apex = False
 try:
@@ -137,7 +137,7 @@ def validate(args):
 
     # create model
     model = create_model(
-        args.model,
+        'vit_small_patch16_224' if args.model=='vit_s' else args.model,
         pretrained=args.pretrained,
         num_classes=args.num_classes,
         in_chans=3,
@@ -146,13 +146,33 @@ def validate(args):
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes
-
+    if args.model=='vit_s':
+        from utils_naman import ConvBlock, normalize_model
+        IMAGENET_MEAN = [c * 1. for c in (0.485, 0.456, 0.406)] #[np.array([0., 0., 0.]), np.array([0.485, 0.456, 0.406])][-1] * 255
+        IMAGENET_STD = [c * 1. for c in (0.229, 0.224, 0.225)]
+        model.patch_embed.proj = ConvBlock(48, end_siz=8)
+        model = normalize_model(model, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+                
     if args.checkpoint:
-        load_checkpoint(model, args.checkpoint, args.use_ema)
+        if args.model=='vit_s':
+            from timm_sam_on.models.helpers import load_state_dict
+            ckpt = load_state_dict(args.checkpoint, args.use_ema)
+            ckpt = {k.replace('module.', ''): v for k, v in ckpt.items()}
+            ckpt = {k.replace('base_model.', ''): v for k, v in ckpt.items()}
+            ckpt = {k.replace('se_', 'se_module.'): v for k, v in ckpt.items()}
+            model.load_state_dict(ckpt, strict=True)
+        else:
+            load_checkpoint(model, args.checkpoint, args.use_ema)
         try:
             epoch = torch.load(args.checkpoint, map_location='cpu')['epoch']
         except:
             epoch=None
+    # if args.checkpoint:
+    #     load_checkpoint(model, args.checkpoint, args.use_ema)
+    #     try:
+    #         epoch = torch.load(args.checkpoint, map_location='cpu')['epoch']
+    #     except:
+    #         epoch=None
     args.epoch=epoch
 
     param_count = sum([m.numel() for m in model.parameters()])
@@ -330,7 +350,8 @@ def main():
         try:
             start_batch_size = args.batch_size
             for i, (m, c) in enumerate(model_cfgs):
-                for use_ema in [True, False]:
+                # for use_ema in [True, False]:
+                for use_ema in [False]:
                     args.use_ema=use_ema
                     batch_size = start_batch_size
                     args.model = m
