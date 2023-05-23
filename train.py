@@ -433,6 +433,7 @@ def main():
         model = torch.jit.script(model)
 
     base_optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
+
     if args.sam_variant=='gsam':
         optimizer = sam.GSAM(params=model.parameters(), base_optimizer=base_optimizer, rho=args.rho, model=model, gsam_alpha=0.01, rho_scheduler=None, adaptive=args.isASAM)
     else:

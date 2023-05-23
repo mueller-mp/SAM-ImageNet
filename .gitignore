@@ -108,5 +108,6 @@ venv.bak/
 *.pth
 *.gz
 *.npz
+*.pt
 Untitled.ipynb
 Testing notebook.ipynb
